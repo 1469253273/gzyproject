@@ -5,6 +5,7 @@ import { Pose } from '@mediapipe/pose';
 import { Camera } from '@mediapipe/camera_utils';
 import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
 import { POSE_CONNECTIONS } from '@mediapipe/pose';
+import { analyzePullup } from './sport/PullupAnalyzer';
 
 // 页面容器
 const PageContainer = styled.div`
@@ -109,11 +110,13 @@ const ExerciseItem = styled.div`
   padding: 12px;
   border-radius: var(--border-radius);
   background-color: ${props => props.selected ? 'var(--primary-light)' : 'white'};
+  border: ${props => props.selected ? '2px solid var(--primary-color)' : '1px solid transparent'};
   cursor: pointer;
   transition: all 0.2s;
   
   &:hover {
     background-color: ${props => props.selected ? 'var(--primary-light)' : 'var(--bg-hover)'};
+    border-color: var(--primary-color);
   }
 `;
 
@@ -452,6 +455,21 @@ const StatLabel = styled.div`
   color: var(--text-light);
 `;
 
+// 调试信息面板
+const DebugPanel = styled.div`
+  position: absolute;
+  bottom: 80px;
+  left: 20px;
+  background-color: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  max-width: 300px;
+  z-index: 100;
+  display: ${props => props.visible ? 'block' : 'none'};
+`;
+
 const TrainingPage = () => {
   // 状态管理
   const [selectedCategory, setSelectedCategory] = useState('all');
@@ -464,6 +482,8 @@ const TrainingPage = () => {
   const [poseScore, setPoseScore] = useState(0);
   const [repCount, setRepCount] = useState(0);
   const [poseFeedback, setPoseFeedback] = useState([]);
+  const [debugInfo, setDebugInfo] = useState('');
+  const [showDebug, setShowDebug] = useState(true); // 调试模式开关
   
   // 引用
   const videoRef = useRef(null);
@@ -474,6 +494,17 @@ const TrainingPage = () => {
   const contextRef = useRef(null);
   const animationRef = useRef(null);
   const lastPoseRef = useRef(null);
+  
+  // 添加调试日志函数
+  const addDebugLog = (message) => {
+    console.log(message);
+    if (showDebug) {
+      setDebugInfo(prev => {
+        const newLog = `${new Date().toLocaleTimeString()}: ${message}`;
+        return `${newLog}\n${prev}`.split('\n').slice(0, 10).join('\n');
+      });
+    }
+  };
   
   // 模拟数据
   const categories = [
@@ -547,40 +578,138 @@ const TrainingPage = () => {
     ? exercises 
     : exercises.filter(ex => ex.category === selectedCategory);
   
+  // 初始化摄像头
+  const initCamera = () => {
+    addDebugLog('开始初始化摄像头...');
+    
+    // 检查视频元素是否存在
+    if (!videoRef.current) {
+      addDebugLog('视频元素不存在');
+      setCameraError('视频元素不存在');
+      return;
+    }
+    
+    // 请求摄像头权限
+    navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720 },
+      audio: false
+    })
+    .then(stream => {
+      addDebugLog('摄像头权限获取成功');
+      
+      // 保存流引用
+      streamRef.current = stream;
+      
+      // 设置视频元素
+      const videoElement = videoRef.current;
+      videoElement.srcObject = stream;
+      
+      // 设置Canvas上下文
+      const canvasElement = canvasRef.current;
+      contextRef.current = canvasElement.getContext('2d');
+      
+      // 监听视频元素尺寸变化
+      videoElement.addEventListener('loadedmetadata', () => {
+        const { videoWidth, videoHeight } = videoElement;
+        addDebugLog(`视频元素尺寸变化: ${videoWidth}x${videoHeight}`);
+        
+        // 更新Canvas尺寸
+        canvasElement.width = videoWidth;
+        canvasElement.height = videoHeight;
+        addDebugLog(`更新Canvas尺寸为: ${videoWidth}x${videoHeight}`);
+      });
+      
+      // 初始化姿态估计模型
+      const pose = initPose();
+      
+      if (pose) {
+        // 创建Camera实例
+        const camera = new Camera(videoElement, {
+          onFrame: async () => {
+            if (poseRef.current) {
+              await poseRef.current.send({ image: videoElement });
+            }
+          },
+          width: 1280,
+          height: 720
+        });
+        
+        // 保存Camera引用
+        cameraRef.current = camera;
+        
+        // 启动Camera
+        camera.start()
+          .then(() => {
+            addDebugLog('Camera启动成功');
+            setCameraActive(true);
+            setCameraError(null);
+          })
+          .catch(error => {
+            addDebugLog(`Camera启动失败: ${error.message}`);
+            setCameraError(`Camera启动失败: ${error.message}`);
+          });
+      }
+    })
+    .catch(error => {
+      addDebugLog(`获取摄像头权限失败: ${error.message}`);
+      setCameraError(`获取摄像头权限失败: ${error.message}`);
+      setCameraPermission(false);
+    });
+  };
+  
   // 初始化姿态估计
   const initPose = () => {
-    // 创建Pose实例
-    const pose = new Pose({
-      locateFile: (file) => {
-        return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
-      }
-    });
-    
-    // 配置Pose参数
-    pose.setOptions({
-      modelComplexity: 1,        // 0: 轻量级模型, 1: 全特性模型
-      smoothLandmarks: true,     // 平滑关键点
-      enableSegmentation: false, // 不需要分割
-      smoothSegmentation: false,
-      minDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5
-    });
-    
-    // 设置结果回调
-    pose.onResults((results) => {
-      // 处理姿态估计结果
-      handlePoseResults(results);
-    });
-    
-    // 保存引用
-    poseRef.current = pose;
-    
-    return pose;
+    try {
+      addDebugLog('开始初始化姿态估计模型...');
+      
+      // 创建Pose实例，使用特定版本的MediaPipe
+      const pose = new Pose({
+        locateFile: (file) => {
+          addDebugLog(`加载MediaPipe文件: ${file}`);
+          // 使用特定版本的MediaPipe库
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${file}`;
+        }
+      });
+      
+      addDebugLog('Pose实例创建成功');
+      
+      // 配置Pose参数
+      pose.setOptions({
+        modelComplexity: 1,        // 0: 轻量级模型, 1: 全特性模型
+        smoothLandmarks: true,     // 平滑关键点
+        enableSegmentation: false, // 不需要分割
+        smoothSegmentation: false,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+      
+      addDebugLog('Pose参数配置成功');
+      
+      // 设置结果回调
+      pose.onResults((results) => {
+        addDebugLog(`收到姿态估计结果: ${results && results.poseLandmarks ? '有关键点' : '无关键点'}`);
+        // 处理姿态估计结果
+        handlePoseResults(results);
+      });
+      
+      // 保存引用
+      poseRef.current = pose;
+      addDebugLog('姿态估计模型初始化完成');
+      
+      return pose;
+    } catch (error) {
+      addDebugLog(`初始化姿态估计模型失败: ${error.message}`);
+      setCameraError(`初始化姿态估计模型失败: ${error.message}`);
+      return null;
+    }
   };
   
   // 处理姿态估计结果
   const handlePoseResults = (results) => {
-    if (!canvasRef.current || !contextRef.current) return;
+    if (!canvasRef.current || !contextRef.current) {
+      addDebugLog('Canvas引用或上下文不存在');
+      return;
+    }
     
     const canvasElement = canvasRef.current;
     const canvasCtx = contextRef.current;
@@ -591,20 +720,29 @@ const TrainingPage = () => {
     
     // 绘制姿态关键点和连接线
     if (results.poseLandmarks) {
+      addDebugLog(`检测到姿态关键点，数量: ${results.poseLandmarks.length}`);
+      
       // 更新状态
       setPoseDetected(true);
       
-      // 绘制连接线
-      drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS,
-                    {color: '#00FF00', lineWidth: 4});
-      
-      // 绘制关键点
-      drawLandmarks(canvasCtx, results.poseLandmarks,
-                   {color: '#FF0000', lineWidth: 2, radius: 6});
-      
-      // 分析姿态
-      analyzePose(results.poseLandmarks);
+      try {
+        // 绘制连接线
+        drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS,
+                      {color: '#00FF00', lineWidth: 4});
+        
+        // 绘制关键点
+        drawLandmarks(canvasCtx, results.poseLandmarks,
+                     {color: '#FF0000', lineWidth: 2, radius: 6});
+        
+        addDebugLog('成功绘制骨骼和关键点');
+        
+        // 分析姿态
+        analyzePose(results.poseLandmarks);
+      } catch (error) {
+        addDebugLog(`绘制骨骼或关键点时出错: ${error.message}`);
+      }
     } else {
+      addDebugLog('未检测到姿态关键点');
       setPoseDetected(false);
     }
     
@@ -613,7 +751,12 @@ const TrainingPage = () => {
   
   // 分析姿态
   const analyzePose = (landmarks) => {
-    if (!selectedExercise) return;
+    if (!selectedExercise) {
+      addDebugLog('未选择动作，无法分析姿态');
+      return;
+    }
+    
+    addDebugLog(`分析姿态，选择的动作ID: ${selectedExercise}`);
     
     // 保存当前姿态用于比较
     const currentPose = [...landmarks];
@@ -629,10 +772,14 @@ const TrainingPage = () => {
       case 3: // 平板支撑
         analyzePlank(currentPose);
         break;
+      case 6: // 引体向上
+        analyzePullup(currentPose, addDebugLog, setPoseScore, setPoseFeedback, setRepCount, lastPoseRef.current);
+        break;
       default:
         // 默认分析 - 简单的姿态评分
         const score = calculateGeneralPoseScore(currentPose);
         setPoseScore(score);
+        addDebugLog(`使用通用评分: ${score}`);
     }
     
     // 更新上一帧姿态
@@ -686,6 +833,7 @@ const TrainingPage = () => {
     
     // 平均膝盖角度
     const kneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
+    addDebugLog(`深蹲分析 - 膝盖角度: ${kneeAngle.toFixed(2)}°`);
     
     // 深蹲状态检测
     const isSquatting = kneeAngle < 120;
@@ -698,6 +846,7 @@ const TrainingPage = () => {
     if (lastPose && isStanding && wasSquatting(lastPose)) {
       // 完成一次深蹲
       setRepCount(prev => prev + 1);
+      addDebugLog('完成一次深蹲');
     }
     
     // 生成反馈
@@ -757,6 +906,8 @@ const TrainingPage = () => {
     if (newFeedback.length > 0) {
       setPoseFeedback(newFeedback);
     }
+    
+    addDebugLog(`深蹲评分: ${score}`);
   };
   
   // 检查上一帧是否处于深蹲状态
@@ -792,224 +943,54 @@ const TrainingPage = () => {
   
   // 检查背部是否挺直
   const checkBackStraight = (landmarks) => {
+    // 获取关键点
     const leftShoulder = landmarks[11];
     const leftHip = landmarks[23];
     const leftKnee = landmarks[25];
     
-    // 计算背部角度
+    // 计算背部角度（肩膀-髋关节-膝盖）
     const backAngle = calculateAngle(leftShoulder, leftHip, leftKnee);
     
-    // 理想情况下，深蹲时背部应该与地面成一定角度但保持直线
+    // 如果角度接近180度，认为背部是挺直的
     return backAngle > 160;
   };
   
-  // 分析俯卧撑动作 (简化版)
-  const analyzePushup = (landmarks) => {
-    // 简单实现，实际项目中需要更复杂的逻辑
-    setPoseScore(75);
-    setPoseFeedback([
-      { id: 1, type: 'success', text: '手臂位置良好' },
-      { id: 2, type: 'warning', text: '尝试降低更多以增加训练效果' }
-    ]);
-  };
-  
-  // 分析平板支撑动作 (简化版)
-  const analyzePlank = (landmarks) => {
-    // 简单实现，实际项目中需要更复杂的逻辑
-    setPoseScore(85);
-    setPoseFeedback([
-      { id: 1, type: 'success', text: '核心收紧，姿势良好' },
-      { id: 2, type: 'info', text: '保持呼吸均匀' }
-    ]);
-  };
-  
-  // 计算一般姿态评分
+  // 通用姿态评分函数
   const calculateGeneralPoseScore = (landmarks) => {
-    // 简单实现，返回一个基本分数
-    return 70;
-  };
-  
-  // 处理摄像头访问
-  const startCamera = async () => {
-    try {
-      // 重置错误状态
-      setCameraError(null);
-      
-      // 请求摄像头权限
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: 'user'
-        } 
-      });
-      
-      // 保存流引用以便后续停止
-      streamRef.current = stream;
-      
-      // 将视频流连接到视频元素
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-      
-      // 更新状态
-      setCameraActive(true);
-      setCameraPermission('granted');
-      
-      console.log('摄像头已成功启动');
-      
-      // 初始化Canvas上下文
-      if (canvasRef.current) {
-        const canvas = canvasRef.current;
-        canvas.width = videoRef.current.videoWidth || 1280;
-        canvas.height = videoRef.current.videoHeight || 720;
-        contextRef.current = canvas.getContext('2d');
-      }
-      
-      // 初始化姿态估计
-      if (!poseRef.current) {
-        const pose = initPose();
-        
-        // 创建Camera实例连接视频和姿态估计
-        if (videoRef.current) {
-          const camera = new Camera(videoRef.current, {
-            onFrame: async () => {
-              if (poseRef.current && isTraining) {
-                await poseRef.current.send({image: videoRef.current});
-              }
-            },
-            width: 1280,
-            height: 720
-          });
-          
-          cameraRef.current = camera;
-          camera.start();
-        }
-      }
-    } catch (error) {
-      console.error('摄像头访问错误:', error);
-      
-      // 处理不同类型的错误
-      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
-        setCameraError('摄像头访问被拒绝。请在浏览器设置中允许摄像头访问，然后刷新页面。');
-        setCameraPermission('denied');
-      } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
-        setCameraError('未找到摄像头设备。请确保您的设备有摄像头并且连接正常。');
-      } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
-        setCameraError('无法访问摄像头。可能被其他应用程序占用，请关闭其他使用摄像头的应用后重试。');
-      } else {
-        setCameraError(`摄像头访问出错: ${error.message}`);
-      }
-    }
-  };
-  
-  // 停止摄像头
-  const stopCamera = () => {
-    if (streamRef.current) {
-      // 停止所有轨道
-      streamRef.current.getTracks().forEach(track => {
-        track.stop();
-      });
-      
-      // 清除视频源
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
-      
-      // 停止Camera
-      if (cameraRef.current) {
-        cameraRef.current.stop();
-      }
-      
-      // 清除Canvas
-      if (canvasRef.current && contextRef.current) {
-        contextRef.current.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-      }
-      
-      // 更新状态
-      setCameraActive(false);
-      setPoseDetected(false);
-      console.log('摄像头已停止');
-    }
-  };
-  
-  // 处理开始/暂停训练
-  const toggleTraining = () => {
-    if (!isTraining) {
-      // 如果摄像头未启动，先启动摄像头
-      if (!cameraActive) {
-        startCamera();
-      }
-      setIsTraining(true);
-      // 重置计数
-      setRepCount(0);
-    } else {
-      setIsTraining(false);
-    }
-  };
-  
-  // 处理停止训练
-  const stopTraining = () => {
-    setIsTraining(false);
-    stopCamera();
-    // 重置状态
-    setPoseDetected(false);
-    setPoseScore(0);
-    setRepCount(0);
-    setPoseFeedback([]);
-  };
-  
-  // 组件卸载时清理资源
-  useEffect(() => {
-    return () => {
-      stopCamera();
-      
-      // 清理姿态估计资源
-      if (poseRef.current) {
-        poseRef.current.close();
-      }
-    };
-  }, []);
-  
-  // 监听视频元素尺寸变化，更新Canvas尺寸
-  useEffect(() => {
-    const updateCanvasSize = () => {
-      if (videoRef.current && canvasRef.current && contextRef.current) {
-        const video = videoRef.current;
-        const canvas = canvasRef.current;
-        
-        // 获取视频元素的显示尺寸
-        const displayWidth = video.clientWidth;
-        const displayHeight = video.clientHeight;
-        
-        // 更新Canvas尺寸
-        if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
-          canvas.width = displayWidth;
-          canvas.height = displayHeight;
-        }
-      }
-    };
-    
-    // 初始更新
-    if (cameraActive) {
-      updateCanvasSize();
+    // 简单的姿态评分逻辑
+    // 检查是否检测到了足够的关键点
+    if (!landmarks || landmarks.length < 33) {
+      return 10; // 关键点不足，给予低分
     }
     
-    // 添加调整大小事件监听器
-    window.addEventListener('resize', updateCanvasSize);
+    // 检查姿态的可见度
+    let visibilitySum = 0;
+    let visiblePoints = 0;
     
-    return () => {
-      window.removeEventListener('resize', updateCanvasSize);
-    };
-  }, [cameraActive]);
+    // 计算关键点的平均可见度
+    landmarks.forEach(point => {
+      if (point.visibility > 0.5) {
+        visibilitySum += point.visibility;
+        visiblePoints++;
+      }
+    });
+    
+    const averageVisibility = visiblePoints > 0 ? visibilitySum / visiblePoints : 0;
+    
+    // 基于可见度计算基础分数
+    let score = averageVisibility * 100;
+    
+    // 确保分数在0-100范围内
+    return Math.max(0, Math.min(100, score));
+  };
   
   return (
     <Layout>
       <PageContainer>
         <PageHeader>
-          <PageTitle>训练</PageTitle>
+          <PageTitle>实时训练</PageTitle>
           <PageDescription>
-            选择您想要练习的动作，开始AI辅助训练，获得实时反馈和指导
+            选择一个动作，跟随AI教练进行训练，获取实时反馈和评分
           </PageDescription>
         </PageHeader>
         
@@ -1038,16 +1019,20 @@ const TrainingPage = () => {
                 <ExerciseItem 
                   key={exercise.id}
                   selected={selectedExercise === exercise.id}
-                  onClick={() => setSelectedExercise(exercise.id)}
+                  onClick={() => {
+                    setSelectedExercise(exercise.id);
+                    addDebugLog(`选择动作: ${exercise.name}, 动作ID: ${exercise.id}`);
+                    setRepCount(0);
+                    setPoseScore(0);
+                  }}
                 >
                   <ExerciseImage>
-                    {/* 实际项目中应使用真实图片 */}
-                    <img src={`/placeholder/${exercise.image}`} alt={exercise.name} />
+                    <img src={`/images/exercises/${exercise.image}`} alt={exercise.name} />
                   </ExerciseImage>
                   <ExerciseInfo>
                     <ExerciseName>{exercise.name}</ExerciseName>
                     <ExerciseMeta>
-                      <span>{exercise.target}</span>
+                      <span>目标: {exercise.target}</span>
                       <DifficultyBadge level={exercise.difficulty}>
                         {exercise.difficulty === 'easy' ? '初级' : 
                          exercise.difficulty === 'medium' ? '中级' : '高级'}
@@ -1061,100 +1046,80 @@ const TrainingPage = () => {
           
           {/* 视频显示区域 */}
           <VideoDisplayArea>
-            {/* 视频元素 */}
             <VideoElement 
               ref={videoRef}
               autoPlay
               playsInline
-              muted
-              style={{ display: cameraActive ? 'block' : 'none' }}
-              onCanPlay={() => {
-                if (videoRef.current) {
-                  videoRef.current.play();
-                  
-                  // 更新Canvas尺寸
-                  if (canvasRef.current) {
-                    canvasRef.current.width = videoRef.current.clientWidth;
-                    canvasRef.current.height = videoRef.current.clientHeight;
-                    contextRef.current = canvasRef.current.getContext('2d');
+            />
+            <CanvasElement ref={canvasRef} />
+            
+            {!cameraActive && (
+              <VideoOverlay>
+                {cameraError ? (
+                  <ErrorMessage>
+                    {cameraError}
+                  </ErrorMessage>
+                ) : (
+                  <VideoPlaceholder>
+                    <i className="fas fa-video"></i>
+                    <h3>准备开始训练</h3>
+                    <p>点击下方按钮启动摄像头，确保您的全身在画面中</p>
+                  </VideoPlaceholder>
+                )}
+              </VideoOverlay>
+            )}
+            
+            <VideoControls>
+              <ControlButton 
+                onClick={() => {
+                  if (cameraActive) {
+                    // 停止摄像头
+                    if (streamRef.current) {
+                      streamRef.current.getTracks().forEach(track => track.stop());
+                    }
+                    setCameraActive(false);
+                    setIsTraining(false);
+                    addDebugLog('摄像头已停止');
+                  } else {
+                    // 启动摄像头
+                    initCamera();
                   }
-                }
-              }}
-            />
-            
-            {/* Canvas元素用于绘制骨骼 */}
-            <CanvasElement 
-              ref={canvasRef}
-              style={{ display: cameraActive ? 'block' : 'none' }}
-            />
-            
-            {/* 视频占位符或覆盖层 */}
-            {!cameraActive && !isTraining ? (
-              <VideoPlaceholder>
-                <i className="fas fa-video"></i>
-                <h3>准备开始训练</h3>
-                <p>选择一个动作并点击开始按钮，系统将通过摄像头捕捉您的动作</p>
-              </VideoPlaceholder>
-            ) : isTraining && !poseDetected && (
-              <VideoOverlay>
-                <i className="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '15px' }}></i>
-                <h3>正在分析您的动作</h3>
-                <p>AI系统正在实时分析您的姿势和动作质量</p>
-              </VideoOverlay>
-            )}
-            
-            {/* 摄像头错误信息 */}
-            {cameraError && (
-              <VideoOverlay>
-                <i className="fas fa-exclamation-triangle" style={{ fontSize: '2rem', color: 'var(--danger-color)', marginBottom: '15px' }}></i>
-                <ErrorMessage>{cameraError}</ErrorMessage>
-                <button 
-                  className="btn btn-primary"
-                  onClick={startCamera}
+                }}
+              >
+                <i className={`fas ${cameraActive ? 'fa-video-slash' : 'fa-video'}`}></i>
+              </ControlButton>
+              
+              {cameraActive && (
+                <ControlButton 
+                  primary
+                  onClick={() => {
+                    setIsTraining(!isTraining);
+                    addDebugLog(`${isTraining ? '暂停' : '开始'}训练`);
+                  }}
                 >
-                  重试
-                </button>
-              </VideoOverlay>
-            )}
+                  <i className={`fas ${isTraining ? 'fa-pause' : 'fa-play'}`}></i>
+                </ControlButton>
+              )}
+            </VideoControls>
             
             <CameraSettings>
-              <SettingsButton>
+              <SettingsButton onClick={() => setShowDebug(!showDebug)}>
                 <i className="fas fa-cog"></i>
               </SettingsButton>
             </CameraSettings>
             
-            <VideoControls>
-              <ControlButton onClick={() => {
-                if (cameraActive) {
-                  stopCamera();
-                  setTimeout(startCamera, 500);
-                } else {
-                  startCamera();
-                }
-              }}>
-                <i className="fas fa-redo"></i>
-              </ControlButton>
-              <ControlButton primary onClick={toggleTraining}>
-                {isTraining ? <i className="fas fa-pause"></i> : <i className="fas fa-play"></i>}
-              </ControlButton>
-              <ControlButton onClick={stopTraining}>
-                <i className="fas fa-stop"></i>
-              </ControlButton>
-            </VideoControls>
+            <DebugPanel visible={showDebug}>
+              {debugInfo}
+            </DebugPanel>
           </VideoDisplayArea>
           
           {/* 实时反馈面板 */}
           <FeedbackPanel>
-            <PanelTitle>
-              <i className="fas fa-chart-line"></i>
-              实时反馈
-            </PanelTitle>
-            
             <ScoreSection>
               <ScoreCircle score={poseScore}>
                 <ScoreValue>{poseScore}</ScoreValue>
               </ScoreCircle>
-              <ScoreLabel>动作评分</ScoreLabel>
+              <ScoreLabel>姿势评分</ScoreLabel>
             </ScoreSection>
             
             <CounterSection>
@@ -1163,37 +1128,29 @@ const TrainingPage = () => {
                 <CounterLabel>完成次数</CounterLabel>
               </CounterItem>
               <CounterItem>
-                <CounterValue>20</CounterValue>
-                <CounterLabel>目标次数</CounterLabel>
+                <CounterValue>{Math.floor(repCount * 1.5)}</CounterValue>
+                <CounterLabel>消耗卡路里</CounterLabel>
               </CounterItem>
             </CounterSection>
             
             <FeedbackSection>
               <FeedbackTitle>
                 <i className="fas fa-comment-alt"></i>
-                动作指导
+                实时反馈
               </FeedbackTitle>
               
               <FeedbackList>
-                {poseFeedback.length > 0 ? (
-                  poseFeedback.map(feedback => (
-                    <FeedbackItem key={feedback.id} type={feedback.type}>
-                      <FeedbackText>{feedback.text}</FeedbackText>
-                    </FeedbackItem>
-                  ))
-                ) : (
-                  feedbacks.map(feedback => (
-                    <FeedbackItem key={feedback.id} type={feedback.type}>
-                      <FeedbackText>{feedback.text}</FeedbackText>
-                    </FeedbackItem>
-                  ))
-                )}
+                {poseFeedback.map(feedback => (
+                  <FeedbackItem key={feedback.id} type={feedback.type}>
+                    <FeedbackText>{feedback.text}</FeedbackText>
+                  </FeedbackItem>
+                ))}
               </FeedbackList>
             </FeedbackSection>
           </FeedbackPanel>
         </MainContent>
         
-        {/* 训练数据统计区域 */}
+        {/* 训练数据统计 */}
         <StatsContainer>
           <PanelTitle>
             <i className="fas fa-chart-bar"></i>
@@ -1202,24 +1159,35 @@ const TrainingPage = () => {
           
           <StatsGrid>
             <StatCard>
-              <StatIcon><i className="fas fa-clock"></i></StatIcon>
-              <StatValue>25:18</StatValue>
-              <StatLabel>训练时长</StatLabel>
-            </StatCard>
-            <StatCard>
-              <StatIcon><i className="fas fa-fire"></i></StatIcon>
-              <StatValue>187</StatValue>
+              <StatIcon>
+                <i className="fas fa-fire"></i>
+              </StatIcon>
+              <StatValue>{Math.floor(repCount * 1.5)}</StatValue>
               <StatLabel>消耗卡路里</StatLabel>
             </StatCard>
+            
             <StatCard>
-              <StatIcon><i className="fas fa-check-circle"></i></StatIcon>
-              <StatValue>48</StatValue>
-              <StatLabel>完成动作次数</StatLabel>
+              <StatIcon>
+                <i className="fas fa-stopwatch"></i>
+              </StatIcon>
+              <StatValue>00:05:30</StatValue>
+              <StatLabel>训练时长</StatLabel>
             </StatCard>
+            
             <StatCard>
-              <StatIcon><i className="fas fa-star"></i></StatIcon>
-              <StatValue>82%</StatValue>
-              <StatLabel>平均准确率</StatLabel>
+              <StatIcon>
+                <i className="fas fa-trophy"></i>
+              </StatIcon>
+              <StatValue>{repCount}</StatValue>
+              <StatLabel>完成次数</StatLabel>
+            </StatCard>
+            
+            <StatCard>
+              <StatIcon>
+                <i className="fas fa-star"></i>
+              </StatIcon>
+              <StatValue>{poseScore}</StatValue>
+              <StatLabel>平均评分</StatLabel>
             </StatCard>
           </StatsGrid>
         </StatsContainer>
