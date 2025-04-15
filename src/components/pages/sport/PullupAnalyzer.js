@@ -3,6 +3,8 @@
  * 分析用户的引体向上动作，计算评分并提供反馈
  */
 
+import SpeechService from '../../../services/SpeechService';
+
 /**
  * 分析引体向上动作
  * @param {Array} landmarks - MediaPipe Pose模型检测到的姿态关键点
@@ -11,9 +13,10 @@
  * @param {Function} setPoseFeedback - 设置姿态反馈的函数
  * @param {Function} setRepCount - 设置重复次数的函数
  * @param {Object} lastPose - 上一帧的姿态关键点
+ * @param {Boolean} speechEnabled - 语音指导是否启用
  * @returns {void}
  */
-export const analyzePullup = (landmarks, addDebugLog, setPoseScore, setPoseFeedback, setRepCount, lastPose) => {
+export const analyzePullup = (landmarks, addDebugLog, setPoseScore, setPoseFeedback, setRepCount, lastPose, speechEnabled = true) => {
   // 获取上肢关键点
   const leftShoulder = landmarks[11];
   const leftElbow = landmarks[13];
@@ -47,7 +50,19 @@ export const analyzePullup = (landmarks, addDebugLog, setPoseScore, setPoseFeedb
   // 计数逻辑
   if (lastPose && isHanging && wasPullingUp(lastPose)) {
     // 完成一次引体向上
-    setRepCount(prev => prev + 1);
+    setRepCount(prev => {
+      const newCount = prev + 1;
+      // 添加语音反馈
+      if (speechEnabled) {
+        if (newCount % 5 === 0) {
+          // 每5个里程碑特殊鼓励
+          SpeechService.speak(`太棒了！已经完成${newCount}个引体向上，继续加油！`);
+        } else {
+          SpeechService.speak(`完成第${newCount}个引体向上，做得很好！`);
+        }
+      }
+      return newCount;
+    });
     addDebugLog('完成一次引体向上');
   }
   
@@ -56,6 +71,9 @@ export const analyzePullup = (landmarks, addDebugLog, setPoseScore, setPoseFeedb
   
   // 评分计算 (0-100)
   let score = 0;
+  
+  // 语音指导文本
+  let speechText = '';
   
   if (isPullingUp) {
     // 检查肘部角度
@@ -66,6 +84,7 @@ export const analyzePullup = (landmarks, addDebugLog, setPoseScore, setPoseFeedb
         type: 'success',
         text: '引体向上姿势良好，手臂弯曲充分'
       });
+      speechText = '姿势很好，继续保持';
     } else {
       score += 20;
       newFeedback.push({
@@ -73,6 +92,7 @@ export const analyzePullup = (landmarks, addDebugLog, setPoseScore, setPoseFeedb
         type: 'warning',
         text: '尝试更多弯曲手臂，使下巴接近横杆'
       });
+      speechText = '再弯曲手臂一些，让下巴接近横杆';
     }
     
     // 检查肩膀是否对称
@@ -84,6 +104,11 @@ export const analyzePullup = (landmarks, addDebugLog, setPoseScore, setPoseFeedb
         type: 'error',
         text: '肩膀不对称，尝试均匀用力'
       });
+      
+      // 如果之前没有语音文本，设置语音文本
+      if (!speechText) {
+        speechText = '肩膀不对称，请均匀用力';
+      }
     } else {
       score += 20;
     }
@@ -97,8 +122,18 @@ export const analyzePullup = (landmarks, addDebugLog, setPoseScore, setPoseFeedb
         type: 'error',
         text: '身体摆动过大，尝试保持身体稳定'
       });
+      
+      // 如果之前没有语音文本，设置语音文本
+      if (!speechText) {
+        speechText = '身体摆动过大，保持稳定';
+      }
     } else {
       score += 20;
+    }
+    
+    // 播放语音指导
+    if (speechEnabled && speechText) {
+      SpeechService.speak(speechText);
     }
   } else if (isHanging) {
     // 悬挂状态的反馈
@@ -108,6 +143,11 @@ export const analyzePullup = (landmarks, addDebugLog, setPoseScore, setPoseFeedb
       text: '准备拉起，保持肩膀放松'
     });
     score = 30; // 基础分数
+    
+    // 随机播放鼓励语音
+    if (speechEnabled && Math.random() < 0.1) { // 10%的概率播放
+      SpeechService.speak('准备拉起，保持肩膀放松');
+    }
   } else {
     // 其他状态
     newFeedback.push({
@@ -116,6 +156,11 @@ export const analyzePullup = (landmarks, addDebugLog, setPoseScore, setPoseFeedb
       text: '请面对摄像头，双手与肩同宽，模拟引体向上动作'
     });
     score = 10; // 低分数
+    
+    // 如果长时间未检测到正确姿势，播放指导语音
+    if (speechEnabled && Math.random() < 0.05) { // 5%的概率播放
+      SpeechService.speak('请面对摄像头，双手与肩同宽，模拟引体向上动作');
+    }
   }
   
   // 确保分数在0-100范围内
