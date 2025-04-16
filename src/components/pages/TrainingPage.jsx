@@ -761,26 +761,26 @@ const TrainingPage = () => {
     // 保存当前姿态用于比较
     const currentPose = [...landmarks];
     
-    // 根据选择的动作进行分析
-    switch(selectedExercise) {
-      case 1: // 深蹲
-        analyzeSquat(currentPose);
-        break;
-      case 2: // 俯卧撑
-        analyzePushup(currentPose);
-        break;
-      case 3: // 平板支撑
-        analyzePlank(currentPose);
-        break;
-      case 6: // 引体向上
-        analyzePullup(currentPose, addDebugLog, setPoseScore, setPoseFeedback, setRepCount, lastPoseRef.current);
-        break;
-      default:
-        // 默认分析 - 简单的姿态评分
-        const score = calculateGeneralPoseScore(currentPose);
-        setPoseScore(score);
-        addDebugLog(`使用通用评分: ${score}`);
-    }
+  // 根据选择的动作进行分析
+  switch(Number(selectedExercise)) {
+    case 1: // 深蹲
+      analyzeSquat(currentPose);
+      break;
+    case 2: // 俯卧撑
+      analyzePushup(currentPose);
+      break;
+    case 3: // 平板支撑
+      analyzePlank(currentPose);
+      break;
+    case 6: // 引体向上
+      analyzePullup(currentPose, addDebugLog, setPoseScore, setPoseFeedback, setRepCount, lastPoseRef.current);
+      break;
+    default:
+      // 默认分析 - 简单的姿态评分
+      const score = calculateGeneralPoseScore(currentPose);
+      setPoseScore(score);
+      addDebugLog(`使用通用评分: ${score}, 选择的动作ID: ${selectedExercise}`);
+  }
     
     // 更新上一帧姿态
     lastPoseRef.current = currentPose;
